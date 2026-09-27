@@ -99,3 +99,43 @@ The default batch size is 1,000 records. This reduces peak memory usage and allo
 ### Candidate Set
 
 The resulting unique query-reference pairs form the candidate set passed to the subsequent matching stage. The retrieval score and the field responsible for retrieving the candidate are retained for downstream processing.
+## 5. Matching Model and Decision Logic
+
+After candidate generation, each Source 1–candidate pair is evaluated using a set of similarity features.
+
+### Weighted Match Score
+
+The matching stage combines name, address, token-overlap, address-number, and country information.
+
+The current scoring function is:
+
+match_score =
+    0.40 × name_similarity
+  + 0.15 × name_token_overlap
+  + 0.30 × address_similarity
+  + 0.10 × address_token_overlap
+  + 0.05 × address_number_similarity
+
+Name and address similarity receive the largest weights because they provide the primary evidence for whether two business records represent the same entity.
+
+### Country Consistency
+
+Country disagreement is treated as strong negative evidence when country information is available for both records.
+
+The pipeline does not hard-code a fixed set of countries. When both country values are known and they disagree, the calculated match score is multiplied by 0.25.
+
+This allows the pipeline to handle countries that may appear in the test data but were not present in the training data.
+
+### Match Selection
+
+Candidates are ranked by their calculated match score for each Source 1 entity.
+
+The strongest candidate must reach the main matching threshold before any match is accepted.
+
+Additional candidates are handled more conservatively and must reach a stricter secondary threshold. This supports Source 1 entities that genuinely correspond to multiple records while reducing the risk of false merges.
+
+If the strongest candidate does not reach the main threshold, the Source 1 entity is treated as having no accepted match.
+
+The matcher also applies a maximum number of accepted matches per Source 1 entity.
+
+The threshold values and maximum-match setting are configurable and should be selected using validation on labelled training data.
