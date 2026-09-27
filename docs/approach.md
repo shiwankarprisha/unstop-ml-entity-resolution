@@ -59,3 +59,43 @@ The preprocessing stage adds two normalized columns to each dataframe:
 - `address_normalized`
 
 These normalized fields are subsequently used by the candidate-generation and matching stages.
+## 4. Candidate Generation / Blocking
+
+Comparing every Source 1 record against every Source 2 and Source 3 record would be computationally expensive. The candidate-generation stage therefore retrieves only a small set of plausible reference records for each query record.
+
+### Character-Level TF-IDF Retrieval
+
+Candidate retrieval uses character-level TF-IDF representations of the normalized business name and address fields.
+
+The TF-IDF vectorizer uses:
+
+- Analyzer: `char_wb`
+- Character n-gram range: 3 to 5
+- Minimum document frequency: 2
+- Data type: `float32`
+- Normalization: L2
+
+Character n-grams are used to make retrieval more tolerant of spelling variations, formatting differences, abbreviations, and other noisy text variations.
+
+### Nearest-Neighbor Retrieval
+
+For each query record, the system retrieves the Top-K reference records using cosine distance through `NearestNeighbors`.
+
+Candidates are generated independently using:
+
+1. `name_normalized`
+2. `address_normalized`
+
+The default retrieval limit is 10 candidates from the business name and 10 candidates from the business address.
+
+The two candidate sets are then combined. If the same query-reference pair is retrieved through both fields, duplicate pairs are removed and the candidate with the stronger retrieval score is retained.
+
+### Batch Processing
+
+Query records are processed in batches rather than constructing a complete query-by-reference similarity matrix in memory.
+
+The default batch size is 1,000 records. This reduces peak memory usage and allows the retrieval process to scale to larger datasets.
+
+### Candidate Set
+
+The resulting unique query-reference pairs form the candidate set passed to the subsequent matching stage. The retrieval score and the field responsible for retrieving the candidate are retained for downstream processing.
