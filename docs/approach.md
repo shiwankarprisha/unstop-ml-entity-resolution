@@ -214,3 +214,18 @@ The resulting columns are:
 Both files are written as tab-separated values (TSV) files with headers and without an additional index column.
 
 The output directory is created automatically if it does not already exist.
+## 8. Validation
+
+Before final submission, the generated output files are checked against the challenge requirements.
+
+The validation checks include:
+
+- Every Source 1 test entity has exactly one row.
+- There are no duplicate Source 1 entity IDs.
+- `matched_entity_ids` contains only valid Source 2 or Source 3 entity IDs.
+- `candidate_entity_ids` contains only valid Source 2 or Source 3 entity IDs.
+- There are no duplicate IDs within an individual ID list.
+- Every final matched entity is present in the corresponding candidate set.
+- Both output files use the required tab-separated format and column names.
+
+The challenge provides a standard validation utility for checking these requirements before submission.
