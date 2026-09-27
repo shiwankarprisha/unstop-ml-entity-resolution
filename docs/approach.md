@@ -4,228 +4,657 @@
 
 The objective of this project is to identify matching business records across three independent data sources.
 
-Source 1 is the deduplicated reference source. For each Source 1 entity, the system identifies corresponding records from Source 2 and Source 3. A Source 1 entity may have zero, one, or multiple matching records.
+For each Source 1 entity, the system identifies corresponding records from Source 2 and Source 3.
 
-The input data contains noisy and inconsistent business names and addresses. The solution therefore uses a scalable candidate-generation (blocking) stage to reduce the number of possible comparisons, followed by a matching stage to determine the most likely entity matches.
+The same real-world business may appear differently across sources because of:
+
+- differences in business-name formatting
+- spelling variations
+- punctuation
+- abbreviations
+- address formatting
+- missing or inconsistent information
+
+Because of these variations, direct exact matching is insufficient.
+
+The final solution therefore uses:
+
+1. Text normalization
+2. Candidate generation / blocking
+3. Similarity scoring
+4. Top-K candidate selection
+5. Selective fallback
+6. Final threshold-based matching
+7. Output validation
+
+---
 
 ## 2. Overall Pipeline
 
-The solution follows the following high-level pipeline:
+The final V2 pipeline follows this structure:
 
-1. Load the Source 1, Source 2, and Source 3 records.
-2. Normalize business names and addresses.
-3. Generate a small candidate set for each Source 1 entity using blocking.
-4. Compute similarity features between Source 1 records and their candidates.
-5. Apply the matching logic to select likely matches.
-6. Generate `matching_results.tsv`.
-7. Generate `candidate_pairs.tsv` containing the final candidate set evaluated by the matching stage.
-8. Validate the output files before submission.
-9. ## 3. Data Preprocessing and Normalization
+```text
+Source 1 / Source 2 / Source 3
+              |
+              v
+       Preprocessing
+              |
+              v
+   Primary Candidate Generation
+              |
+              v
+      Primary Similarity Scoring
+              |
+              v
+       Top-20 Candidates
+              |
+              v
+    Primary Confidence Check
+          /          \
+      Strong          Weak / Missing
+        |                  |
+        |               Fallback
+        |                  |
+        |        Medium-token candidates
+        |                  |
+        |              Top-50 Candidates
+        |                  |
+        \__________________/
+                 |
+                 v
+          Final Scoring
+                 |
+                 v
+        Threshold Filtering
+                 |
+                 v
+        Final Predictions
+                 |
+                 v
+             Validation
+```
 
-The preprocessing stage creates normalized versions of the business name and business address fields while preserving Unicode characters.
+The key design principle is to avoid exhaustive comparison between all Source 1 entities and all reference entities.
 
-### Business Name Normalization
+Instead, candidate generation first reduces the search space, after which detailed similarity calculations are applied to plausible candidate pairs.
 
-Business names are normalized using the following steps:
+---
 
-1. Missing values are converted to empty strings.
-2. Text is converted to lowercase.
-3. Unicode text is normalized using NFKC normalization.
-4. The `&` character is standardized to the word `and`.
-5. Common website prefixes and domain suffixes are removed:
-   - `www.`
-   - `.com`
-   - `.in`
-   - `.org`
-   - `.net`
-6. Characters that are not Unicode letters, numbers, combining marks, or whitespace are replaced with spaces.
-7. Repeated whitespace is collapsed and leading/trailing whitespace is removed.
+## 3. Data Preprocessing and Normalization
 
-### Business Address Normalization
+Business names and addresses are normalized before candidate generation and matching.
 
-Business addresses use a similar normalization process:
+The preprocessing stage handles common sources of textual variation, including:
 
-1. Missing values are converted to empty strings.
-2. Text is converted to lowercase.
-3. Unicode text is normalized using NFKC normalization.
-4. Characters that are not Unicode letters, numbers, combining marks, or whitespace are replaced with spaces.
-5. Repeated whitespace is collapsed and leading/trailing whitespace is removed.
+- missing values
+- Unicode normalization
+- lowercase conversion
+- punctuation normalization
+- whitespace normalization
+- field-specific text cleaning
 
-### Generated Features
+Two normalized representations are used throughout the pipeline:
 
-The preprocessing stage adds two normalized columns to each dataframe:
+```text
+name_normalized
+address_normalized
+```
 
-- `name_normalized`
-- `address_normalized`
+### Business Name
 
-These normalized fields are subsequently used by the candidate-generation and matching stages.
+The normalized business name is used for:
+
+- exact candidate retrieval
+- token extraction
+- candidate generation
+- similarity calculation
+
+### Address
+
+The normalized address is used for:
+
+- token extraction
+- candidate generation
+- similarity calculation
+
+The purpose of normalization is to remove irrelevant formatting differences while preserving information useful for identifying the same business.
+
+---
+
 ## 4. Candidate Generation / Blocking
 
-Comparing every Source 1 record against every Source 2 and Source 3 record would be computationally expensive. The candidate-generation stage therefore retrieves only a small set of plausible reference records for each query record.
+### 4.1 Motivation
 
-### Character-Level TF-IDF Retrieval
+Comparing every Source 1 entity against every Source 2 and Source 3 entity would result in a very large number of pairwise comparisons.
 
-Candidate retrieval uses character-level TF-IDF representations of the normalized business name and address fields.
+This is both computationally expensive and unnecessary because most entity pairs are clearly unrelated.
 
-The TF-IDF vectorizer uses:
+The pipeline therefore uses blocking to retrieve only plausible candidates.
 
-- Analyzer: `char_wb`
-- Character n-gram range: 3 to 5
-- Minimum document frequency: 2
-- Data type: `float32`
-- Normalization: L2
+```text
+Source 1 entity
+       |
+       v
+Normalized name / address
+       |
+       v
+Candidate-generation indexes
+       |
+       v
+Candidate entity IDs
+       |
+       v
+Detailed similarity scoring
+```
 
-Character n-grams are used to make retrieval more tolerant of spelling variations, formatting differences, abbreviations, and other noisy text variations.
+Blocking is particularly important because candidate generation determines the maximum possible recall of the matching stage.
 
-### Nearest-Neighbor Retrieval
+If the correct entity is not included in the candidate set, the downstream matcher cannot recover it.
 
-For each query record, the system retrieves the Top-K reference records using cosine distance through `NearestNeighbors`.
+---
 
-Candidates are generated independently using:
+## 5. Primary Candidate Generation
 
-1. `name_normalized`
-2. `address_normalized`
+The final V2 primary candidate pool combines two complementary sources of evidence:
 
-The default retrieval limit is 10 candidates from the business name and 10 candidates from the business address.
+1. Exact normalized candidates
+2. Rare/informative token candidates
 
-The two candidate sets are then combined. If the same query-reference pair is retrieved through both fields, duplicate pairs are removed and the candidate with the stronger retrieval score is retained.
+### 5.1 Exact Candidates
+
+Exact normalized evidence is used to retrieve strong candidate pairs efficiently.
+
+These candidates provide high-value matches where normalized business information agrees directly.
+
+### 5.2 Rare / Informative Token Candidates
+
+Normalized business names and addresses are tokenized.
+
+Token frequency information is used to identify relatively rare and informative tokens.
+
+Rare tokens are useful blocking keys because they generally retrieve a smaller and more relevant subset of reference records than common tokens.
+
+The process is conceptually:
+
+```text
+Normalized name / address
+          |
+          v
+        Tokens
+          |
+          v
+  Token frequency analysis
+          |
+          v
+Rare / informative tokens
+          |
+          v
+ Reference lookup
+          |
+          v
+ Candidate entity IDs
+```
+
+Candidate pairs generated from different blocking mechanisms are combined and deduplicated.
+
+---
+
+## 6. Primary Candidate Pool
+
+The final V2 primary candidate pool contained:
+
+```text
+46,277,162 candidate pairs
+```
+
+covering:
+
+```text
+1,578,910 Source 1 entities
+```
+
+This candidate pool is substantially smaller than an exhaustive all-pairs comparison.
+
+The purpose of this stage is to retain broad candidate coverage while avoiding unnecessary detailed similarity calculations.
+
+---
+
+## 7. Primary Similarity Scoring
+
+Each primary candidate pair is evaluated using normalized business-name and address similarity.
+
+The similarity function used is Jaro-Winkler similarity.
+
+### Name Similarity
+
+Jaro-Winkler similarity is calculated between:
+
+```text
+Source 1 normalized name
+candidate normalized name
+```
+
+### Address Similarity
+
+Jaro-Winkler similarity is calculated between:
+
+```text
+Source 1 normalized address
+candidate normalized address
+```
+
+The primary score is:
+
+```text
+primary_score =
+    0.60 × name_similarity
+  + 0.40 × address_similarity
+```
+
+The name therefore contributes 60% of the primary score and the address contributes 40%.
+
+---
+
+## 8. Top-20 Primary Candidate Selection
+
+Candidates are ranked independently for every Source 1 entity.
+
+Only the strongest 20 primary candidates are retained:
+
+```text
+Top-20 candidates per Source 1 entity
+```
+
+The ranking uses the primary score.
+
+Deterministic tie-breaking is applied using:
+
+1. primary score
+2. exact normalized name agreement
+3. exact normalized address agreement
+4. candidate ID
+
+This Top-K reduction limits the number of candidate pairs passed to later stages.
+
+---
+
+## 9. Selective Fallback
+
+Some Source 1 entities do not receive sufficiently strong evidence from the primary candidate-generation stage.
+
+Rather than performing a broader search for every entity, the pipeline applies fallback selectively.
+
+An entity enters the fallback stage when:
+
+```text
+best_primary_score < 0.95
+```
+
+or when:
+
+```text
+no primary candidate exists
+```
+
+The fallback stage is therefore focused on difficult or insufficiently covered Source 1 entities.
+
+This provides additional candidate coverage without applying the more expensive fallback process to the entire dataset.
+
+---
+
+## 10. Fallback Candidate Generation
+
+The fallback stage uses medium-frequency tokens from normalized business names and addresses.
+
+This provides broader candidate coverage than the primary rare-token search.
+
+Fallback processing is performed in batches of:
+
+```text
+10,000 Source 1 entities
+```
+
+Batch processing limits memory usage during large-scale candidate generation.
+
+Fallback candidates are scored and ranked, and the strongest:
+
+```text
+Top-50 candidates per fallback Source 1 entity
+```
+
+are retained.
+
+The relevant primary and fallback candidates are then combined before final matching.
+
+---
+
+## 11. Final Candidate Set
+
+Primary and fallback candidates are combined before final matching.
+
+Duplicate Source 1/candidate pairs are removed.
+
+This is important because the same candidate may have been retrieved through multiple candidate-generation paths.
+
+The resulting candidate set represents the complete set of entities considered by the final matching stage.
+
+---
+
+## 12. Final Matching Score
+
+The final matching stage uses equal weighting between business-name and address similarity.
+
+The final score is:
+
+```text
+final_score =
+    0.50 × name_similarity
+  + 0.50 × address_similarity
+```
+
+This gives equal importance to name and address evidence during the final matching decision.
+
+---
+
+## 13. Final Matching Threshold
+
+A candidate is accepted as a final match only when:
+
+```text
+final_score >= 0.850
+```
+
+Candidates below this threshold are not accepted.
+
+The threshold provides a separation between:
+
+```text
+Candidate generation
+```
+
+and:
+
+```text
+Final match acceptance
+```
+
+A candidate being retrieved does not automatically mean that it is accepted as a match.
+
+---
+
+## 14. No-Match Handling
+
+The system does not force every Source 1 entity to receive a match.
+
+If none of the available candidates reaches the final acceptance threshold, the Source 1 entity remains unmatched.
+
+Therefore:
+
+```text
+Candidate exists
+       ≠
+Candidate must be matched
+```
+
+An empty match is a valid output.
+
+This is important for avoiding low-confidence false matches.
+
+---
+
+## 15. Scalability
+
+The final design improves scalability through several mechanisms.
+
+### Blocking
+
+Only plausible candidate pairs are passed to detailed similarity scoring.
+
+### Exact Retrieval
+
+Exact normalized evidence provides inexpensive candidate retrieval.
+
+### Token-Based Retrieval
+
+Informative tokens provide targeted candidate retrieval without scanning the entire reference dataset.
+
+### Top-K Reduction
+
+Only Top-20 primary candidates are retained.
+
+Fallback entities retain only Top-50 candidates.
+
+### Selective Fallback
+
+The broader fallback search is applied only to Source 1 entities that have weak or missing primary evidence.
 
 ### Batch Processing
 
-Query records are processed in batches rather than constructing a complete query-by-reference similarity matrix in memory.
+Fallback processing uses batches of 10,000 Source 1 entities to control memory consumption.
 
-The default batch size is 1,000 records. This reduces peak memory usage and allows the retrieval process to scale to larger datasets.
+Together, these mechanisms substantially reduce the amount of detailed pairwise similarity computation required.
 
-### Candidate Set
+---
 
-The resulting unique query-reference pairs form the candidate set passed to the subsequent matching stage. The retrieval score and the field responsible for retrieving the candidate are retained for downstream processing.
-## 5. Matching Model and Decision Logic
+## 16. Feature Summary
 
-After candidate generation, each Source 1–candidate pair is evaluated using a set of similarity features.
+The final V2 matching pipeline primarily uses:
 
-### Weighted Match Score
+| Feature | Description |
+|---|---|
+| Name similarity | Jaro-Winkler similarity of normalized business names |
+| Address similarity | Jaro-Winkler similarity of normalized business addresses |
 
-The matching stage combines name, address, token-overlap, address-number, and country information.
+The primary and final stages use different weights:
 
-The current scoring function is:
+```text
+Primary:
+60% name + 40% address
 
-match_score =
-    0.40 × name_similarity
-  + 0.15 × name_token_overlap
-  + 0.30 × address_similarity
-  + 0.10 × address_token_overlap
-  + 0.05 × address_number_similarity
+Final:
+50% name + 50% address
+```
 
-Name and address similarity receive the largest weights because they provide the primary evidence for whether two business records represent the same entity.
+The primary score is used to rank and reduce candidates, while the final score is used for the final acceptance decision.
 
-### Country Consistency
+---
 
-Country disagreement is treated as strong negative evidence when country information is available for both records.
+## 17. Validation
 
-The pipeline does not hard-code a fixed set of countries. When both country values are known and they disagree, the calculated match score is multiplied by 0.25.
+The final pipeline performs validation at multiple levels.
 
-This allows the pipeline to handle countries that may appear in the test data but were not present in the training data.
+### Matching Integrity
 
-### Match Selection
+The final matching output is checked for:
 
-Candidates are ranked by their calculated match score for each Source 1 entity.
+- duplicate pairs
+- invalid Source 1 IDs
+- invalid candidate IDs
 
-The strongest candidate must reach the main matching threshold before any match is accepted.
+The final V2 matching validation reported:
 
-Additional candidates are handled more conservatively and must reach a stricter secondary threshold. This supports Source 1 entities that genuinely correspond to multiple records while reducing the risk of false merges.
+```text
+Duplicate pairs:       0
+Invalid Source 1 IDs:  0
+Invalid candidate IDs: 0
+```
 
-If the strongest candidate does not reach the main threshold, the Source 1 entity is treated as having no accepted match.
+### Candidate File Integrity
 
-The matcher also applies a maximum number of accepted matches per Source 1 entity.
+The candidate output is checked for:
 
-The threshold values and maximum-match setting are configurable and should be selected using validation on labelled training data.
-## 6. Feature Engineering
+- correct row count
+- unique Source 1 IDs
+- duplicate Source 1 rows
+- malformed rows
+- duplicate candidate IDs
 
-For each candidate pair, the pipeline calculates multiple similarity features using the normalized business name and address fields.
+The final V2 candidate validation reported:
 
-### Name Features
+```text
+Data rows:               1,732,544
+Unique Source 1 IDs:     1,732,544
+Duplicate Source 1 IDs: 0
+Malformed rows:          0
+Duplicate candidate IDs: 0
+```
 
-Two features are calculated for business names:
+### Prediction / Candidate Consistency
 
-- `name_similarity`: Character-level similarity calculated using Python's `SequenceMatcher`.
-- `name_token_overlap`: Jaccard similarity between the sets of whitespace-separated name tokens.
+Every final prediction is checked against the candidate set.
 
-### Address Features
+The final V2 validation reported:
 
-Three features are calculated for business addresses:
+```text
+Source 1 rows checked:    1,732,544
+Predicted links checked:  5,030,669
+Missing predicted links:  0
+Missing Source 1 rows:    0
+```
 
-- `address_similarity`: Character-level similarity using `SequenceMatcher`.
-- `address_token_overlap`: Jaccard similarity between address token sets.
-- `address_number_similarity`: Jaccard similarity between the sets of numeric components extracted from the two addresses.
+Therefore every final predicted link is represented in the corresponding candidate set.
 
-Numeric components can capture useful evidence such as matching building numbers or postal-code components.
+---
 
-### Country Feature
+## 18. Final V2 Statistics
 
-A `country_match` feature is also calculated.
+The final validated V2 output contains:
 
-The feature is:
+| Metric | Value |
+|---|---:|
+| Source 1 test entities | 1,732,544 |
+| Source 1 entities with matches | 1,574,040 |
+| Source 1 entities without matches | 158,504 |
+| Final predicted links | 5,030,669 |
+| Primary candidate pairs | 46,277,162 |
+| Primary Source 1 entities covered | 1,578,910 |
+| Primary candidate limit | Top-20 |
+| Fallback trigger | Best primary score < 0.95 |
+| Fallback candidate limit | Top-50 |
+| Fallback batch size | 10,000 |
+| Final score | 50% name + 50% address |
+| Final threshold | 0.850 |
 
-- `1.0` when both country values are present and equal after trimming whitespace and converting to lowercase.
-- `0.0` when the values are missing, empty, or different.
+---
 
-The implementation does not assume a fixed list of countries, allowing the pipeline to handle previously unseen country labels.
+## 19. Output Files
 
-### Feature Construction
+The final pipeline generates two TSV files.
 
-The candidate pairs are joined with the corresponding normalized Source 1 and reference records. The resulting feature table contains the candidate identifiers together with the similarity signals used by the matching stage.
+### `candidate_pairs.tsv`
 
-These features provide complementary evidence: character similarity captures textual closeness, token overlap captures shared words, numeric similarity captures address-number consistency, and country agreement provides an additional consistency signal.
-## 7. Submission Output Generation
+Contains the candidate entity IDs considered for each Source 1 entity.
 
-The pipeline generates the two required TSV output files:
+Expected columns:
 
-- `candidate_pairs.tsv`
-- `matching_results.tsv`
+```text
+source1_entity_id
+candidate_entity_ids
+```
 
-### Candidate Pairs
+Every Source 1 entity has a corresponding row.
 
-`candidate_pairs.tsv` contains the candidate records generated for each Source 1 entity.
+### `matching_results.tsv`
 
-The candidate pairs are grouped by Source 1 entity and converted into comma-separated candidate ID lists. Duplicate candidate IDs are removed while preserving their order.
+Contains the final accepted matches.
 
-The output is then merged against the complete list of Source 1 entities so that every Source 1 entity receives exactly one row. Entities for which no candidates were generated receive an empty candidate list.
+Expected columns:
 
-The resulting columns are:
+```text
+source1_entity_id
+matched_entity_ids
+```
 
-- `source1_entity_id`
-- `candidate_entity_ids`
+Every Source 1 entity has a corresponding row.
 
-### Matching Results
+An empty `matched_entity_ids` value represents a Source 1 entity for which no candidate passed the final threshold.
 
-`matching_results.tsv` contains the final accepted matches produced by the matching stage.
+Every final predicted entity must be present in the corresponding candidate set.
 
-As with candidate generation, the results are grouped by Source 1 entity and converted into comma-separated matched entity ID lists. Duplicate IDs are removed while preserving order.
+---
 
-The output is merged against the complete Source 1 entity list so that every Source 1 entity has exactly one row. Entities with no accepted matches receive an empty `matched_entity_ids` value.
+## 20. Reproducibility
 
-The resulting columns are:
+The intended final execution flow is:
 
-- `source1_entity_id`
-- `matched_entity_ids`
+```text
+1. Load Source 1, Source 2 and Source 3 data
+2. Normalize business names and addresses
+3. Generate exact and rare-token primary candidates
+4. Calculate primary name and address similarities
+5. Rank and retain Top-20 primary candidates
+6. Identify Source 1 entities requiring fallback
+7. Generate medium-token fallback candidates
+8. Process fallback candidates in batches
+9. Retain Top-50 fallback candidates
+10. Combine primary and fallback candidates
+11. Calculate final matching scores
+12. Apply the 0.850 final threshold
+13. Generate candidate_pairs.tsv
+14. Generate matching_results.tsv
+15. Validate both output files
+```
 
-### File Format
+The final V2 implementation and configuration should be treated as the source of truth for reproducing the submitted result.
 
-Both files are written as tab-separated values (TSV) files with headers and without an additional index column.
+---
 
-The output directory is created automatically if it does not already exist.
-## 8. Validation
+## 21. Final Configuration
 
-Before final submission, the generated output files are checked against the challenge requirements.
+The validated V2 configuration is:
 
-The validation checks include:
+```text
+Primary candidate generation:
+Exact + rare/informative token candidates
 
-- Every Source 1 test entity has exactly one row.
-- There are no duplicate Source 1 entity IDs.
-- `matched_entity_ids` contains only valid Source 2 or Source 3 entity IDs.
-- `candidate_entity_ids` contains only valid Source 2 or Source 3 entity IDs.
-- There are no duplicate IDs within an individual ID list.
-- Every final matched entity is present in the corresponding candidate set.
-- Both output files use the required tab-separated format and column names.
+Primary score:
+0.60 × name similarity + 0.40 × address similarity
 
-The challenge provides a standard validation utility for checking these requirements before submission.
+Primary candidate limit:
+Top-20
+
+Fallback trigger:
+Best primary score < 0.95 or no primary candidate
+
+Fallback candidate generation:
+Medium-frequency token candidates
+
+Fallback candidate limit:
+Top-50
+
+Fallback batch size:
+10,000 Source 1 entities
+
+Final score:
+0.50 × name similarity + 0.50 × address similarity
+
+Final acceptance threshold:
+0.850
+```
+
+---
+
+## 22. Summary
+
+The final solution separates entity resolution into two main stages:
+
+1. Efficient candidate retrieval
+2. Detailed candidate matching
+
+The candidate-generation stage uses exact and informative token evidence to reduce the search space.
+
+The primary candidate stage uses Jaro-Winkler name and address similarity with a 60/40 weighting and retains the Top-20 candidates.
+
+Entities with weak or missing primary evidence are processed using a selective medium-token fallback stage.
+
+The fallback stage retains the Top-50 candidates for each difficult entity.
+
+The final matching stage uses equal weighting between name and address similarity and accepts candidates only when:
+
+```text
+final_score >= 0.850
+```
+
+The final outputs are validated for structural integrity, identifier validity, duplicate records, and consistency between candidate and matching files.
+
+This architecture provides a scalable approach to large-scale business entity resolution while separating broad candidate retrieval from the final high-confidence matching decision.
