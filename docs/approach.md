@@ -139,3 +139,40 @@ If the strongest candidate does not reach the main threshold, the Source 1 entit
 The matcher also applies a maximum number of accepted matches per Source 1 entity.
 
 The threshold values and maximum-match setting are configurable and should be selected using validation on labelled training data.
+## 6. Feature Engineering
+
+For each candidate pair, the pipeline calculates multiple similarity features using the normalized business name and address fields.
+
+### Name Features
+
+Two features are calculated for business names:
+
+- `name_similarity`: Character-level similarity calculated using Python's `SequenceMatcher`.
+- `name_token_overlap`: Jaccard similarity between the sets of whitespace-separated name tokens.
+
+### Address Features
+
+Three features are calculated for business addresses:
+
+- `address_similarity`: Character-level similarity using `SequenceMatcher`.
+- `address_token_overlap`: Jaccard similarity between address token sets.
+- `address_number_similarity`: Jaccard similarity between the sets of numeric components extracted from the two addresses.
+
+Numeric components can capture useful evidence such as matching building numbers or postal-code components.
+
+### Country Feature
+
+A `country_match` feature is also calculated.
+
+The feature is:
+
+- `1.0` when both country values are present and equal after trimming whitespace and converting to lowercase.
+- `0.0` when the values are missing, empty, or different.
+
+The implementation does not assume a fixed list of countries, allowing the pipeline to handle previously unseen country labels.
+
+### Feature Construction
+
+The candidate pairs are joined with the corresponding normalized Source 1 and reference records. The resulting feature table contains the candidate identifiers together with the similarity signals used by the matching stage.
+
+These features provide complementary evidence: character similarity captures textual closeness, token overlap captures shared words, numeric similarity captures address-number consistency, and country agreement provides an additional consistency signal.
