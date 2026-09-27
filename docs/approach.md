@@ -176,3 +176,41 @@ The implementation does not assume a fixed list of countries, allowing the pipel
 The candidate pairs are joined with the corresponding normalized Source 1 and reference records. The resulting feature table contains the candidate identifiers together with the similarity signals used by the matching stage.
 
 These features provide complementary evidence: character similarity captures textual closeness, token overlap captures shared words, numeric similarity captures address-number consistency, and country agreement provides an additional consistency signal.
+## 7. Submission Output Generation
+
+The pipeline generates the two required TSV output files:
+
+- `candidate_pairs.tsv`
+- `matching_results.tsv`
+
+### Candidate Pairs
+
+`candidate_pairs.tsv` contains the candidate records generated for each Source 1 entity.
+
+The candidate pairs are grouped by Source 1 entity and converted into comma-separated candidate ID lists. Duplicate candidate IDs are removed while preserving their order.
+
+The output is then merged against the complete list of Source 1 entities so that every Source 1 entity receives exactly one row. Entities for which no candidates were generated receive an empty candidate list.
+
+The resulting columns are:
+
+- `source1_entity_id`
+- `candidate_entity_ids`
+
+### Matching Results
+
+`matching_results.tsv` contains the final accepted matches produced by the matching stage.
+
+As with candidate generation, the results are grouped by Source 1 entity and converted into comma-separated matched entity ID lists. Duplicate IDs are removed while preserving order.
+
+The output is merged against the complete Source 1 entity list so that every Source 1 entity has exactly one row. Entities with no accepted matches receive an empty `matched_entity_ids` value.
+
+The resulting columns are:
+
+- `source1_entity_id`
+- `matched_entity_ids`
+
+### File Format
+
+Both files are written as tab-separated values (TSV) files with headers and without an additional index column.
+
+The output directory is created automatically if it does not already exist.
