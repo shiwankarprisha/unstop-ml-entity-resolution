@@ -20,3 +20,42 @@ The solution follows the following high-level pipeline:
 6. Generate `matching_results.tsv`.
 7. Generate `candidate_pairs.tsv` containing the final candidate set evaluated by the matching stage.
 8. Validate the output files before submission.
+9. ## 3. Data Preprocessing and Normalization
+
+The preprocessing stage creates normalized versions of the business name and business address fields while preserving Unicode characters.
+
+### Business Name Normalization
+
+Business names are normalized using the following steps:
+
+1. Missing values are converted to empty strings.
+2. Text is converted to lowercase.
+3. Unicode text is normalized using NFKC normalization.
+4. The `&` character is standardized to the word `and`.
+5. Common website prefixes and domain suffixes are removed:
+   - `www.`
+   - `.com`
+   - `.in`
+   - `.org`
+   - `.net`
+6. Characters that are not Unicode letters, numbers, combining marks, or whitespace are replaced with spaces.
+7. Repeated whitespace is collapsed and leading/trailing whitespace is removed.
+
+### Business Address Normalization
+
+Business addresses use a similar normalization process:
+
+1. Missing values are converted to empty strings.
+2. Text is converted to lowercase.
+3. Unicode text is normalized using NFKC normalization.
+4. Characters that are not Unicode letters, numbers, combining marks, or whitespace are replaced with spaces.
+5. Repeated whitespace is collapsed and leading/trailing whitespace is removed.
+
+### Generated Features
+
+The preprocessing stage adds two normalized columns to each dataframe:
+
+- `name_normalized`
+- `address_normalized`
+
+These normalized fields are subsequently used by the candidate-generation and matching stages.
