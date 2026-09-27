@@ -81,9 +81,17 @@ features.py — feature engineering
 matching.py — match scoring and selection
 generate_submission.py — final TSV generation
 ## 5.Reproducibility
-The pipeline is designed to process the provided challenge data through preprocessing, candidate generation, feature engineering, matching, and submission generation.
+The pipeline is organized into modular source files under `src/`.
 
-Final execution instructions and model configuration should be updated to reflect the final validated pipeline used for submission.
+The end-to-end execution order is:
+
+1. Preprocess the input records using `preprocessing.py`.
+2. Generate candidate pairs using `blocking.py`.
+3. Build matching features using `features.py`.
+4. Score and select matches using `matching.py`.
+5. Generate the final TSV files using `generate_submission.py`.
+
+The exact final execution command and configuration will be updated after the final validated pipeline version is selected.
 ## 6.Output Files 
 matching_results.tsv
 
